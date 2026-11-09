@@ -20,6 +20,8 @@ import type { TelegramLink } from "./links";
 
 export type Attachment = Photo | Video | Audio | Voice | Document;
 
+const downloadStallTimeout = 60_000;
+
 export function userClient(config: TelegramConfig): TelegramClient {
   return new TelegramClient({
     apiId: config.TG_API_ID,
@@ -188,25 +190,41 @@ export class TelegramSource {
     progressCallback: (downloaded: number, total: number) => void,
   ): Promise<void> {
     const signal = AbortSignal.timeout(60 * 60_000);
+    const stalled = new AbortController();
+    const resetStallTimer = () =>
+      setTimeout(
+        () => stalled.abort(new MtTimeoutError(downloadStallTimeout)),
+        downloadStallTimeout,
+      );
     try {
+      let stallTimer = resetStallTimer();
       const chunks = this.#client.downloadAsIterable(media, {
-        progressCallback,
+        progressCallback(done, total) {
+          clearTimeout(stallTimer);
+          stallTimer = resetStallTimer();
+          progressCallback(done, total);
+        },
         partSize: (media.fileSize ?? 0) > 5_000_000 ? 512 : undefined,
-        stallTimeout: 60_000,
-        abortSignal: signal,
+        abortSignal: AbortSignal.any([signal, stalled.signal]),
       });
       try {
-        await pipeline(chunks, createWriteStream(file, { flags: "wx" }));
+        await pipeline(
+          chunks,
+          createWriteStream(file, { flags: "wx" }),
+        ).finally(() => clearTimeout(stallTimer));
       } catch (error) {
+        const failure: unknown = stalled.signal.aborted
+          ? stalled.signal.reason
+          : error;
         const total = media.fileSize;
         if (
-          !(error instanceof MtTimeoutError) ||
+          !(failure instanceof MtTimeoutError) ||
           media.type === "photo" ||
           !total
         )
-          throw error;
+          throw failure;
         const { size: offset } = await stat(file);
-        if (offset >= total) throw error;
+        if (offset >= total) throw failure;
 
         console.info("resuming stalled download", { offset, total });
         const location: tl.RawInputDocumentFileLocation = {
