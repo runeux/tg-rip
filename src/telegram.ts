@@ -134,9 +134,10 @@ export class TelegramSource {
       }
       const [message] = await this.#client.getMessages(chat, id);
       if (!message) throw new UserError(copy.inaccessible);
-      const messages = message.groupedId
-        ? await this.#client.getMessageGroup({ chatId: chat, message: id })
-        : [message];
+      const messages =
+        message.groupedId && !new URL(link.url).searchParams.has("single")
+          ? await this.#client.getMessageGroup({ chatId: chat, message: id })
+          : [message];
       return messages
         .sort((a, b) => a.id - b.id)
         .flatMap((item) => {
