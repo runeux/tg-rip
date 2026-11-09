@@ -1,4 +1,5 @@
 import { createWriteStream } from "node:fs";
+import { stat } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import {
   type Audio,
@@ -14,6 +15,7 @@ import {
 } from "@mtcute/bun";
 import type { TelegramConfig } from "./config";
 import { copy, UserError } from "./copy";
+import { resumeDownload } from "./download";
 import type { TelegramLink } from "./links";
 
 export type Attachment = Photo | Video | Audio | Voice | Document;
@@ -185,16 +187,61 @@ export class TelegramSource {
     media: Attachment,
     progressCallback: (downloaded: number, total: number) => void,
   ): Promise<void> {
+    const signal = AbortSignal.timeout(60 * 60_000);
     try {
       const chunks = this.#client.downloadAsIterable(media, {
         progressCallback,
         partSize: (media.fileSize ?? 0) > 5_000_000 ? 512 : undefined,
         stallTimeout: 60_000,
-        abortSignal: AbortSignal.timeout(60 * 60_000),
+        abortSignal: signal,
       });
-      await pipeline(chunks, createWriteStream(file, { flags: "wx" }));
+      try {
+        await pipeline(chunks, createWriteStream(file, { flags: "wx" }));
+      } catch (error) {
+        const total = media.fileSize;
+        if (
+          !(error instanceof MtTimeoutError) ||
+          media.type === "photo" ||
+          !total
+        )
+          throw error;
+        const { size: offset } = await stat(file);
+        if (offset >= total) throw error;
+
+        console.info("resuming stalled download", { offset, total });
+        const location: tl.RawInputDocumentFileLocation = {
+          _: "inputDocumentFileLocation",
+          id: media.raw.id,
+          accessHash: media.raw.accessHash,
+          fileReference: media.raw.fileReference,
+          thumbSize: "",
+        };
+        const resumed = resumeDownload(
+          async (offset, limit, abortSignal) => {
+            const result = await this.#client.call(
+              { _: "upload.getFile", location, offset, limit, precise: true },
+              {
+                kind: "download",
+                dcId: media.dcId,
+                maxRetryCount: 0,
+                floodSleepThreshold: 0,
+                abortSignal,
+              },
+            );
+            if (result._ !== "upload.file")
+              throw new UserError(copy.unavailable);
+            return result.bytes;
+          },
+          offset,
+          total,
+          signal,
+          progressCallback,
+        );
+        await pipeline(resumed, createWriteStream(file, { flags: "a" }));
+      }
     } catch (error) {
       if (
+        signal.aborted ||
         error instanceof MtTimeoutError ||
         (error instanceof Error && error.name === "TimeoutError")
       ) {
