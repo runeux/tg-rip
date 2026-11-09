@@ -1,3 +1,5 @@
+import { createWriteStream } from "node:fs";
+import { pipeline } from "node:stream/promises";
 import {
   type Audio,
   type Document,
@@ -183,12 +185,13 @@ export class TelegramSource {
     progressCallback: (downloaded: number, total: number) => void,
   ): Promise<void> {
     try {
-      await this.#client.downloadToFile(file, media, {
+      const chunks = this.#client.downloadAsIterable(media, {
         progressCallback,
         partSize: (media.fileSize ?? 0) > 5_000_000 ? 512 : undefined,
         stallTimeout: 60_000,
         abortSignal: AbortSignal.timeout(60 * 60_000),
       });
+      await pipeline(chunks, createWriteStream(file, { flags: "wx" }));
     } catch (error) {
       if (
         error instanceof MtTimeoutError ||

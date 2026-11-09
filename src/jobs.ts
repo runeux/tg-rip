@@ -101,6 +101,7 @@ export function worker(
             error instanceof Error ? error.name : "unknown",
           );
         await status.fail(message);
+        throw new Error(message);
       }
     },
     { connection, concurrency: 1, maxStalledCount: 0 },
