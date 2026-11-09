@@ -8,6 +8,19 @@ export type TelegramLink =
       url: string;
     };
 
+export function singleMediaUrl(
+  link: Extract<TelegramLink, { kind: "post" }>,
+  id: number,
+): string {
+  const url = new URL(link.url);
+  if (link.comment) url.searchParams.set("comment", String(id));
+  else url.pathname = url.pathname.replace(/\/\d+\/?$/, `/${id}`);
+  url.searchParams.delete("single");
+  const query = url.searchParams.toString();
+  url.search = query ? `single&${query}` : "single";
+  return url.href;
+}
+
 const username = /^[a-zA-Z][a-zA-Z0-9_]{2,31}$/;
 
 function positiveId(value: string | undefined): number | undefined {

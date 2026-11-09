@@ -53,7 +53,7 @@ export function worker(
         switch (task.kind) {
           case "link": {
             const files = await source.fromLink(task.link);
-            await deliver(
+            const complete = await deliver(
               uploader,
               source,
               status,
@@ -61,6 +61,7 @@ export function worker(
               files,
               task.link.url,
             );
+            if (!complete) break;
             try {
               await api.deleteMessage(task.chat, task.message);
             } catch (error) {
@@ -87,7 +88,9 @@ export function worker(
             if (!snapshot.items.some(({ id }) => id === task.id))
               throw new UserError(copy.expired);
             const file = await source.getTimed(snapshot.chat, task.id);
-            await deliver(uploader, source, status, task.chat, [file]);
+            await deliver(uploader, source, status, task.chat, [
+              { media: file },
+            ]);
           }
         }
         await status.finish();
@@ -100,8 +103,10 @@ export function worker(
             task.kind,
             error instanceof Error ? error.name : "unknown",
           );
-        await status.fail(message);
-        throw new Error(message);
+        const parseMode =
+          error instanceof UserError ? error.parseMode : undefined;
+        await status.fail(message, parseMode);
+        throw new Error(parseMode ? copy.failed : message);
       }
     },
     { connection, concurrency: 1, maxStalledCount: 0 },

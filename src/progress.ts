@@ -13,11 +13,14 @@ export class TransferStatus {
     private readonly message?: number,
   ) {}
 
-  async #edit(text: string) {
+  async #edit(text: string, parseMode?: "HTML") {
     if (this.message === undefined || text === this.#text) return;
     this.#lastEdit = Date.now();
     try {
-      await this.api.editMessageText(this.chat, this.message, text);
+      await this.api.editMessageText(this.chat, this.message, text, {
+        parse_mode: parseMode,
+        link_preview_options: { is_disabled: true },
+      });
       this.#text = text;
     } catch (error) {
       console.warn(
@@ -62,10 +65,14 @@ export class TransferStatus {
     }
   }
 
-  async fail(text: string) {
-    await this.stage(text);
+  async fail(text: string, parseMode?: "HTML") {
+    await this.#pending;
+    await this.#edit(text, parseMode);
     if (this.#text !== text) {
-      await this.api.sendMessage(this.chat, text);
+      await this.api.sendMessage(this.chat, text, {
+        parse_mode: parseMode,
+        link_preview_options: { is_disabled: true },
+      });
     }
   }
 }

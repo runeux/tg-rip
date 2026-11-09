@@ -8,14 +8,13 @@ import {
   type InputMediaPhoto,
   type InputMediaVideo,
   type InputMediaVoice,
-  type InputText,
   MtTimeoutError,
   TelegramClient,
 } from "@mtcute/bun";
 import type { Config } from "./config";
-import { copy, sourceCaption, UserError } from "./copy";
+import { copy, downloadFailures, sourceCaption, UserError } from "./copy";
 import type { TransferStatus } from "./progress";
-import type { Attachment, TelegramSource } from "./telegram";
+import type { Attachment, SourceAttachment, TelegramSource } from "./telegram";
 
 const maxBytes = 2_000_000_000;
 
@@ -121,18 +120,12 @@ function filename(media: Attachment): string {
   }
 }
 
-function outgoingMedia(
-  media: Attachment,
-  path: string,
-  size: number,
-  caption?: InputText,
-): Media {
+function outgoingMedia(media: Attachment, path: string, size: number): Media {
   const base = {
     file: Bun.file(path).stream(),
     fileSize: size,
     fileName: filename(media),
     fileMime: media.type === "photo" ? "image/jpeg" : media.mimeType,
-    caption,
   };
   switch (media.type) {
     case "photo":
@@ -186,51 +179,74 @@ function album(files: Media[]): Media[] {
 }
 
 export async function deliver(
-  uploader: BotUploader,
-  source: TelegramSource,
+  uploader: Pick<BotUploader, "send">,
+  source: Pick<TelegramSource, "download">,
   status: TransferStatus,
   chat: number,
-  attachments: Attachment[],
+  attachments: SourceAttachment[],
   link?: string,
 ) {
   if (!attachments.length) throw new UserError(copy.noMedia);
-  if (attachments.some((media) => (media.fileSize ?? 0) > maxBytes)) {
-    throw new UserError(copy.tooLarge);
-  }
-
-  const caption = link ? html(sourceCaption(link)) : undefined;
   const directory = await mkdtemp(join(tmpdir(), "tg-rip-"));
-  const downloadTotal = attachments.every((media) => media.fileSize)
-    ? attachments.reduce((sum, media) => sum + (media.fileSize ?? 0), 0)
+  const downloadTotal = attachments.every(({ media }) => media.fileSize)
+    ? attachments.reduce((sum, { media }) => sum + (media.fileSize ?? 0), 0)
     : Infinity;
-  let downloaded = 0;
+  let processed = 0;
 
   try {
     const files: Media[] = [];
     const sizes: number[] = [];
+    const failures: string[] = [];
     await status.stage("downloading…");
 
-    for (const [index, media] of attachments.entries()) {
+    for (const [index, { media, url }] of attachments.entries()) {
       const path = join(directory, String(index));
-      await source.download(path, media, (done, total) => {
-        status.progress(
-          "downloading",
-          downloaded + done,
-          attachments.length === 1 ? total : downloadTotal,
+      const expected = media.fileSize ?? 0;
+      let size: number;
+      try {
+        if (expected > maxBytes) throw new UserError(copy.tooLarge);
+        await source.download(path, media, (done, total) => {
+          status.progress(
+            "downloading",
+            processed + done,
+            attachments.length === 1 ? total : downloadTotal,
+          );
+        });
+        ({ size } = await stat(path));
+        if (size > maxBytes) throw new UserError(copy.tooLarge);
+        if (!size || (expected && size !== expected))
+          throw new UserError(copy.unavailable);
+      } catch (error) {
+        if (attachments.length === 1 || !url) throw error;
+        console.warn(
+          "album item failed",
+          error instanceof UserError ? error.message : "download error",
         );
-      });
-      const { size } = await stat(path);
-      if (size === 0) throw new UserError(copy.unavailable);
-      if (size > maxBytes) throw new UserError(copy.tooLarge);
-      downloaded += size;
+        failures.push(url);
+        processed += expected;
+        continue;
+      }
+
+      processed += size;
       sizes.push(size);
-      files.push(
-        outgoingMedia(media, path, size, index === 0 ? caption : undefined),
-      );
+      files.push(outgoingMedia(media, path, size));
     }
 
+    const notice = failures.length ? downloadFailures(failures) : undefined;
+    if (!files.length)
+      throw new UserError(notice ?? copy.failed, notice ? "HTML" : undefined);
+
+    const caption = [link ? sourceCaption(link) : undefined, notice]
+      .filter(Boolean)
+      .join("<br><br>");
+    if (caption) files[0].caption = html(caption);
     await uploader.send(chat, album(files), sizes, status);
-    console.info("media delivered", { files: files.length, bytes: downloaded });
+    console.info("media delivered", {
+      files: files.length,
+      bytes: sizes.reduce((sum, size) => sum + size, 0),
+      failed: failures.length,
+    });
+    return failures.length === 0;
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

@@ -1,8 +1,10 @@
 import { expect, spyOn, test } from "bun:test";
 import {
   Chat,
+  Dialog,
   Long,
   Message,
+  MtPeerNotFoundError,
   PeersIndex,
   TelegramClient,
   User,
@@ -36,7 +38,7 @@ function albumPhoto(id: number, channelId: number) {
   );
 }
 
-test("single links resolve one album item while regular links resolve the album", async () => {
+test("resolves an archived album on a fresh session and respects single links", async () => {
   const chat = new Chat({
     _: "channel",
     id: 2557209455,
@@ -47,12 +49,36 @@ test("single links resolve one album item while regular links resolve the album"
   });
   const selected = albumPhoto(5959, chat.raw.id);
   const other = albumPhoto(5958, chat.raw.id);
+  const dialog = new Dialog(
+    {
+      _: "dialog",
+      peer: { _: "peerChannel", channelId: chat.raw.id },
+      topMessage: selected.id,
+      readInboxMaxId: 0,
+      readOutboxMaxId: 0,
+      unreadCount: 0,
+      unreadMentionsCount: 0,
+      unreadReactionsCount: 0,
+      unreadPollVotesCount: 0,
+      notifySettings: { _: "peerNotifySettings" },
+      folderId: 1,
+    },
+    PeersIndex.from({ chats: [chat.raw] }),
+    new Map(),
+  );
   const client = TelegramClient.prototype;
   const connect = spyOn(client, "connect").mockResolvedValue(undefined);
   const getMe = spyOn(client, "getMe").mockResolvedValue(
     new User({ _: "user", id: 1 }),
   );
-  const getPeer = spyOn(client, "getPeer").mockResolvedValue(chat);
+  const getPeer = spyOn(client, "getPeer")
+    .mockResolvedValue(chat)
+    .mockRejectedValueOnce(new MtPeerNotFoundError());
+  const iterDialogs = spyOn(client, "iterDialogs").mockImplementation(
+    async function* (params) {
+      if (params?.archived === "keep") yield dialog;
+    },
+  );
   const getMessages = spyOn(client, "getMessages").mockResolvedValue([
     selected,
   ]);
@@ -73,17 +99,27 @@ test("single links resolve one album item while regular links resolve the album"
     if (!single || !album) throw new Error("invalid fixture links");
 
     expect(
-      (await source.fromLink(single)).map((item) => item.fileSize),
+      (await source.fromLink(single)).map(({ media }) => media.fileSize),
     ).toEqual([5959]);
     expect(getMessages).toHaveBeenCalledWith(chat.inputPeer, 5959);
     expect(getGroup).not.toHaveBeenCalled();
 
-    expect((await source.fromLink(album)).map((item) => item.fileSize)).toEqual(
-      [5958, 5959],
-    );
+    const items = await source.fromLink(album);
+    expect(items.map(({ media }) => media.fileSize)).toEqual([5958, 5959]);
+    expect(items.map(({ url }) => url)).toEqual([
+      "https://t.me/c/2557209455/5958?single&thread=5952",
+      "https://t.me/c/2557209455/5959?single&thread=5952",
+    ]);
     expect(getGroup).toHaveBeenCalledTimes(1);
   } finally {
-    for (const spy of [connect, getMe, getPeer, getMessages, getGroup]) {
+    for (const spy of [
+      connect,
+      getMe,
+      getPeer,
+      iterDialogs,
+      getMessages,
+      getGroup,
+    ]) {
       spy.mockRestore();
     }
     await source.close();

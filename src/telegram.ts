@@ -1,5 +1,4 @@
 import { createWriteStream } from "node:fs";
-import { stat } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import {
   type Audio,
@@ -15,12 +14,12 @@ import {
 } from "@mtcute/bun";
 import type { TelegramConfig } from "./config";
 import { copy, UserError } from "./copy";
-import { resumeDownload } from "./download";
-import type { TelegramLink } from "./links";
+import { singleMediaUrl, type TelegramLink } from "./links";
 
 export type Attachment = Photo | Video | Audio | Voice | Document;
+export type SourceAttachment = { media: Attachment; url?: string };
 
-const downloadStallTimeout = 60_000;
+const downloadStallTimeout = 15_000;
 
 export function userClient(config: TelegramConfig): TelegramClient {
   return new TelegramClient({
@@ -105,14 +104,16 @@ export class TelegramSource {
     } catch (error) {
       if (!(error instanceof MtPeerNotFoundError) || typeof id !== "number")
         throw error;
-      for await (const dialog of this.#client.iterDialogs()) {
+      for await (const dialog of this.#client.iterDialogs({
+        archived: "keep",
+      })) {
         if (dialog.peer.id === id) return dialog.peer;
       }
       throw error;
     }
   }
 
-  async fromLink(link: TelegramLink): Promise<Attachment[]> {
+  async fromLink(link: TelegramLink): Promise<SourceAttachment[]> {
     await this.#connect();
     try {
       const peer = await this.#peer(link.peer);
@@ -122,7 +123,7 @@ export class TelegramSource {
           link.id,
         );
         if (!story) throw new UserError(copy.inaccessible);
-        return [story.media];
+        return [{ media: story.media }];
       }
 
       let chat = peer.inputPeer;
@@ -146,7 +147,7 @@ export class TelegramSource {
         .sort((a, b) => a.id - b.id)
         .flatMap((item) => {
           const media = attachment(item);
-          return media ? [media] : [];
+          return media ? [{ media, url: singleMediaUrl(link, item.id) }] : [];
         });
     } catch (error) {
       if (isMissing(error)) throw new UserError(copy.inaccessible);
@@ -196,8 +197,8 @@ export class TelegramSource {
         () => stalled.abort(new MtTimeoutError(downloadStallTimeout)),
         downloadStallTimeout,
       );
+    let stallTimer = resetStallTimer();
     try {
-      let stallTimer = resetStallTimer();
       const chunks = this.#client.downloadAsIterable(media, {
         progressCallback(done, total) {
           clearTimeout(stallTimer);
@@ -207,59 +208,13 @@ export class TelegramSource {
         partSize: (media.fileSize ?? 0) > 5_000_000 ? 512 : undefined,
         abortSignal: AbortSignal.any([signal, stalled.signal]),
       });
-      try {
-        await pipeline(
-          chunks,
-          createWriteStream(file, { flags: "wx" }),
-        ).finally(() => clearTimeout(stallTimer));
-      } catch (error) {
-        const failure: unknown = stalled.signal.aborted
-          ? stalled.signal.reason
-          : error;
-        const total = media.fileSize;
-        if (
-          !(failure instanceof MtTimeoutError) ||
-          media.type === "photo" ||
-          !total
-        )
-          throw failure;
-        const { size: offset } = await stat(file);
-        if (offset >= total) throw failure;
-
-        console.info("resuming stalled download", { offset, total });
-        const location: tl.RawInputDocumentFileLocation = {
-          _: "inputDocumentFileLocation",
-          id: media.raw.id,
-          accessHash: media.raw.accessHash,
-          fileReference: media.raw.fileReference,
-          thumbSize: "",
-        };
-        const resumed = resumeDownload(
-          async (offset, limit, abortSignal) => {
-            const result = await this.#client.call(
-              { _: "upload.getFile", location, offset, limit, precise: true },
-              {
-                kind: "download",
-                dcId: media.dcId,
-                maxRetryCount: 0,
-                floodSleepThreshold: 0,
-                abortSignal,
-              },
-            );
-            if (result._ !== "upload.file")
-              throw new UserError(copy.unavailable);
-            return result.bytes;
-          },
-          offset,
-          total,
-          signal,
-          progressCallback,
-        );
-        await pipeline(resumed, createWriteStream(file, { flags: "a" }));
-      }
+      await pipeline(chunks, createWriteStream(file, { flags: "wx" }));
+      stalled.signal.throwIfAborted();
+      signal.throwIfAborted();
     } catch (error) {
       if (
         signal.aborted ||
+        stalled.signal.aborted ||
         error instanceof MtTimeoutError ||
         (error instanceof Error && error.name === "TimeoutError")
       ) {
@@ -273,6 +228,8 @@ export class TelegramSource {
         throw new UserError(copy.unavailable);
       }
       throw error;
+    } finally {
+      clearTimeout(stallTimer);
     }
   }
 
