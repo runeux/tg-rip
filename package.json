@@ -1,0 +1,28 @@
+{
+  "name": "tg-rip",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun src/index.ts",
+    "login": "bun src/login.ts",
+    "build": "bun build src/index.ts src/login.ts --target=bun --packages=external --outdir=dist",
+    "lint": "biome check .",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@grammyjs/conversations": "^2.1.1",
+    "@grammyjs/storage-redis": "2.5.1",
+    "@mtcute/bun": "^0.32.7",
+    "arktype": "^2.2.9",
+    "bullmq": "^6.7.2",
+    "grammy": "^1.46.0",
+    "ioredis": "5.11.1",
+    "qr": "^0.7.2"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.6.6",
+    "@types/bun": "^1.4.4",
+    "typescript": "^7.0.2"
+  }
+}
