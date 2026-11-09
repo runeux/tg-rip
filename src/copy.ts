@@ -7,7 +7,10 @@ export const copy = {
   unavailable: "media unavailable",
   inaccessible: "source unavailable",
   signIn: "telegram sign-in required",
-  tooLarge: "file exceeds 50 mb",
+  tooLarge: "file exceeds 2 gb",
+  downloadTimeout: "download timed out",
+  uploadTimeout: "upload timed out",
+  queueFailed: "couldn’t queue request",
   failed: "couldn’t save media",
 } as const;
 

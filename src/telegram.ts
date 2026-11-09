@@ -3,6 +3,7 @@ import {
   type Document,
   type Message,
   MtPeerNotFoundError,
+  MtTimeoutError,
   type Photo,
   TelegramClient,
   tl,
@@ -21,6 +22,7 @@ export function userClient(config: TelegramConfig): TelegramClient {
     apiHash: config.TG_API_HASH,
     storage: config.SESSION_PATH,
     disableUpdates: true,
+    network: { connectionCount: (kind) => (kind === "main" ? 0 : 1) },
   });
 }
 
@@ -175,12 +177,25 @@ export class TelegramSource {
     }
   }
 
-  async download(file: string, media: Attachment): Promise<void> {
+  async download(
+    file: string,
+    media: Attachment,
+    progressCallback: (downloaded: number, total: number) => void,
+  ): Promise<void> {
     try {
       await this.#client.downloadToFile(file, media, {
-        abortSignal: AbortSignal.timeout(120_000),
+        progressCallback,
+        partSize: (media.fileSize ?? 0) > 5_000_000 ? 512 : undefined,
+        stallTimeout: 60_000,
+        abortSignal: AbortSignal.timeout(60 * 60_000),
       });
     } catch (error) {
+      if (
+        error instanceof MtTimeoutError ||
+        (error instanceof Error && error.name === "TimeoutError")
+      ) {
+        throw new UserError(copy.downloadTimeout);
+      }
       if (
         error instanceof tl.RpcError &&
         (/^FILE_REFERENCE/.test(error.text) ||

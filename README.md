@@ -2,7 +2,7 @@
 
 save media from telegram posts, stories, and timed messages through your own bot.
 
-- **post or story:** paste a telegram link. the bot returns the media with a **source** link and removes your original message after delivery. albums stay together.
+- **post or story:** paste a telegram link. the bot returns the media with a **source** link and removes your original message after delivery. albums stay together. a status message shows transfer progress and disappears after delivery.
 - **timed media:** send the chat id. pick an attachment by date. telegram must still expose the original file to your user session. view-once support is experimental.
 
 ## setup
@@ -27,7 +27,7 @@ docker compose run --rm --no-deps app bun dist/login.js
 docker compose up -d --wait
 ```
 
-the session lives in `state/`. a copied session grants access to the account, so keep it alongside your private configuration. the hosted bot api accepts uploads up to 50 mb per file.
+the session lives in `state/`. a copied session grants access to the account, so keep it alongside your private configuration. the bot uploads over mtproto. files up to 2 gb are supported.
 
 ## checks
 

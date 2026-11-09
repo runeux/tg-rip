@@ -1,24 +1,108 @@
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
-import { type Api, InputFile } from "grammy";
-import type {
-  InputMediaAudio,
-  InputMediaDocument,
-  InputMediaPhoto,
-  InputMediaVideo,
-} from "grammy/types";
+import { basename, dirname, join } from "node:path";
+import {
+  html,
+  type InputMediaAudio,
+  type InputMediaDocument,
+  type InputMediaPhoto,
+  type InputMediaVideo,
+  type InputMediaVoice,
+  type InputText,
+  MtTimeoutError,
+  TelegramClient,
+} from "@mtcute/bun";
+import type { Config } from "./config";
 import { copy, sourceCaption, UserError } from "./copy";
+import type { TransferStatus } from "./progress";
 import type { Attachment, TelegramSource } from "./telegram";
 
-const maxBytes = 50_000_000;
-const captionOptions = { parse_mode: "HTML" } as const;
+const maxBytes = 2_000_000_000;
 
-type AlbumItem =
+type Media =
   | InputMediaPhoto
   | InputMediaVideo
   | InputMediaAudio
-  | InputMediaDocument;
+  | InputMediaDocument
+  | InputMediaVoice;
+
+export class BotUploader {
+  readonly #client: TelegramClient;
+  #ready = false;
+
+  constructor(private readonly config: Config) {
+    this.#client = new TelegramClient({
+      apiId: config.TG_API_ID,
+      apiHash: config.TG_API_HASH,
+      storage: join(dirname(config.SESSION_PATH), "bot-upload.sqlite"),
+      disableUpdates: true,
+      network: {
+        connectionCount: (kind) =>
+          kind === "main" ? 0 : kind === "upload" ? 2 : 1,
+      },
+    });
+  }
+
+  async send(
+    chat: number,
+    files: Media[],
+    sizes: number[],
+    status: TransferStatus,
+  ) {
+    if (!this.#ready) {
+      const self = await this.#client.start({
+        botToken: this.config.BOT_TOKEN,
+        abortSignal: AbortSignal.timeout(30_000),
+      });
+      if (
+        !self.isBot ||
+        self.id !== Number(this.config.BOT_TOKEN.split(":")[0])
+      ) {
+        throw new Error("unexpected upload account");
+      }
+      this.#ready = true;
+    }
+
+    const peer = await this.#client.resolvePeer(chat);
+    const abortSignal = AbortSignal.timeout(60 * 60_000);
+    const total = sizes.reduce((sum, size) => sum + size, 0);
+    let sent = 0;
+    await status.stage("uploading…");
+
+    try {
+      if (files.length === 1) {
+        await this.#client.sendMedia(peer, files[0], {
+          abortSignal,
+          progressCallback: (uploaded) =>
+            status.progress("uploading", uploaded, total),
+        });
+      } else {
+        const uploaded = sizes.map(() => 0);
+        await this.#client.sendMediaGroup(peer, files, {
+          abortSignal,
+          progressCallback: (index, bytes) => {
+            const next = Math.min(bytes, sizes[index]);
+            sent += next - uploaded[index];
+            uploaded[index] = next;
+            status.progress("uploading", sent, total);
+          },
+        });
+      }
+    } catch (error) {
+      if (
+        error instanceof MtTimeoutError ||
+        (error instanceof Error && error.name === "TimeoutError")
+      ) {
+        throw new UserError(copy.uploadTimeout);
+      }
+      throw error;
+    }
+  }
+
+  async close() {
+    await this.#client.destroy();
+  }
+}
 
 function filename(media: Attachment): string {
   if (media.type === "photo") return "photo.jpg";
@@ -37,39 +121,74 @@ function filename(media: Attachment): string {
   }
 }
 
-function albumItem(media: Attachment, file: InputFile): AlbumItem {
+function outgoingMedia(
+  media: Attachment,
+  path: string,
+  size: number,
+  caption?: InputText,
+): Media {
+  const base = {
+    file: Bun.file(path).stream(),
+    fileSize: size,
+    fileName: filename(media),
+    fileMime: media.type === "photo" ? "image/jpeg" : media.mimeType,
+    caption,
+  };
   switch (media.type) {
     case "photo":
-      return { type: "photo", media: file };
+      if (size <= 10_000_000) return { ...base, type: "photo" };
+      break;
     case "video":
       if (media.mimeType === "video/mp4") {
         return {
+          ...base,
           type: "video",
-          media: file,
-          supports_streaming: true,
+          supportsStreaming: true,
           width: media.width,
           height: media.height,
-          duration: Math.ceil(media.duration),
+          duration: media.duration,
         };
       }
       break;
     case "audio":
       if (media.mimeType === "audio/mpeg" || media.mimeType === "audio/mp4") {
         return {
+          ...base,
           type: "audio",
-          media: file,
+          duration: Math.ceil(media.duration),
           title: media.title ?? undefined,
           performer: media.performer ?? undefined,
         };
       }
       break;
+    case "voice":
+      return { ...base, type: "voice", duration: Math.ceil(media.duration) };
   }
-  return { type: "document", media: file };
+  return { ...base, type: "document" };
+}
+
+function album(files: Media[]): Media[] {
+  if (
+    files.length === 1 ||
+    files.every(({ type }) => type === "photo" || type === "video") ||
+    files.every(({ type }) => type === "audio")
+  )
+    return files;
+
+  return files.map(({ file, fileSize, fileName, fileMime, caption }) => ({
+    type: "document",
+    file,
+    fileSize,
+    fileName,
+    fileMime,
+    caption,
+  }));
 }
 
 export async function deliver(
-  api: Api,
+  uploader: BotUploader,
   source: TelegramSource,
+  status: TransferStatus,
   chat: number,
   attachments: Attachment[],
   link?: string,
@@ -78,78 +197,40 @@ export async function deliver(
   if (attachments.some((media) => (media.fileSize ?? 0) > maxBytes)) {
     throw new UserError(copy.tooLarge);
   }
-  const caption = link && sourceCaption(link);
-  const options = { caption, ...captionOptions };
+
+  const caption = link ? html(sourceCaption(link)) : undefined;
   const directory = await mkdtemp(join(tmpdir(), "tg-rip-"));
+  const downloadTotal = attachments.every((media) => media.fileSize)
+    ? attachments.reduce((sum, media) => sum + (media.fileSize ?? 0), 0)
+    : Infinity;
+  let downloaded = 0;
+
   try {
-    const files: AlbumItem[] = [];
+    const files: Media[] = [];
+    const sizes: number[] = [];
+    await status.stage("downloading…");
+
     for (const [index, media] of attachments.entries()) {
       const path = join(directory, String(index));
-      await source.download(path, media);
+      await source.download(path, media, (done, total) => {
+        status.progress(
+          "downloading",
+          downloaded + done,
+          attachments.length === 1 ? total : downloadTotal,
+        );
+      });
       const { size } = await stat(path);
       if (size === 0) throw new UserError(copy.unavailable);
       if (size > maxBytes) throw new UserError(copy.tooLarge);
-      const file = new InputFile(path, filename(media));
-      const photoTooLarge = media.type === "photo" && size > 10_000_000;
+      downloaded += size;
+      sizes.push(size);
       files.push(
-        photoTooLarge
-          ? { type: "document", media: file }
-          : albumItem(media, file),
+        outgoingMedia(media, path, size, index === 0 ? caption : undefined),
       );
     }
 
-    const [first] = files;
-    if (files.length > 1) {
-      const group = files.map((file, index) =>
-        index === 0 ? { ...file, ...options } : file,
-      );
-      if (
-        group.every((file) => file.type === "photo" || file.type === "video") ||
-        group.every((file) => file.type === "audio") ||
-        group.every((file) => file.type === "document")
-      ) {
-        await api.sendMediaGroup(chat, group);
-      } else {
-        await api.sendMediaGroup(
-          chat,
-          group.map(
-            (file, index): InputMediaDocument => ({
-              type: "document",
-              media: file.media,
-              ...(index === 0 ? options : {}),
-            }),
-          ),
-        );
-      }
-      return;
-    }
-    const file = first.media;
-    switch (first.type) {
-      case "photo":
-        await api.sendPhoto(chat, file, options);
-        break;
-      case "video":
-        await api.sendVideo(chat, file, {
-          width: first.width,
-          height: first.height,
-          duration: first.duration,
-          supports_streaming: first.supports_streaming,
-          ...options,
-        });
-        break;
-      case "audio":
-        await api.sendAudio(chat, file, {
-          title: first.title,
-          performer: first.performer,
-          ...options,
-        });
-        break;
-      case "document":
-        if (attachments[0].type === "voice")
-          await api.sendVoice(chat, file, options);
-        else await api.sendDocument(chat, file, options);
-        break;
-    }
+    await uploader.send(chat, album(files), sizes, status);
+    console.info("media delivered", { files: files.length, bytes: downloaded });
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

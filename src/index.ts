@@ -5,6 +5,7 @@ import { webhookCallback } from "grammy";
 import Redis from "ioredis";
 import { createBot } from "./bot";
 import { appConfig } from "./config";
+import { BotUploader } from "./delivery";
 import { taskQueue, worker } from "./jobs";
 import { Picker } from "./picker";
 import { TelegramSource } from "./telegram";
@@ -16,11 +17,12 @@ const redis = new Redis(config.REDIS_URL, { maxRetriesPerRequest: 1 });
 const workerRedis = new Redis(config.REDIS_URL, { maxRetriesPerRequest: null });
 const queue = taskQueue(redis);
 const source = new TelegramSource(config);
+const uploader = new BotUploader(config);
 const picker = new Picker(redis, config.TIME_ZONE);
 const bot = createBot(config, redis, queue, picker);
 await bot.init();
 
-const jobs = worker(workerRedis, bot.api, source, picker);
+const jobs = worker(workerRedis, bot.api, source, picker, uploader);
 jobs.on("error", (error) => console.error("worker error", error.name));
 jobs.on("failed", (_job, error) =>
   console.error("job delivery error", error.name),
@@ -84,7 +86,7 @@ async function shutdown() {
   server.stop();
   await jobs.close();
   await queue.close();
-  await source.close();
+  await Promise.all([source.close(), uploader.close()]);
   redis.disconnect();
   workerRedis.disconnect();
 }

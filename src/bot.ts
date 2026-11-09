@@ -15,6 +15,7 @@ import { copy, UserError } from "./copy";
 import type { Task } from "./jobs";
 import { parseChatId, parseTelegramLink } from "./links";
 import { type Picker, pickerTtl } from "./picker";
+import { TransferStatus } from "./progress";
 
 type BotContext = ConversationFlavor<Context>;
 const action = /^rip:(\d+):(get|page):(\d+)$/;
@@ -26,10 +27,32 @@ export function createBot(
   picker: Picker,
 ) {
   const bot = new Bot<BotContext>(config.BOT_TOKEN, {
-    client: { timeoutSeconds: 600 },
+    client: { timeoutSeconds: 8 },
   });
-  const enqueue = (task: Task, updateId: number) =>
-    queue.add(task.kind, task, { jobId: `update-${updateId}` });
+  async function enqueue(task: Task, updateId: number) {
+    const jobId = `update-${updateId}`;
+    if (await queue.getJob(jobId)) return;
+
+    let statusMessage: number | undefined;
+    try {
+      statusMessage = (await bot.api.sendMessage(task.chat, "queued…"))
+        .message_id;
+    } catch (error) {
+      console.warn(
+        "status unavailable",
+        error instanceof Error ? error.name : "unknown",
+      );
+    }
+
+    try {
+      await queue.add(task.kind, { ...task, statusMessage }, { jobId });
+    } catch (error) {
+      await new TransferStatus(bot.api, task.chat, statusMessage).fail(
+        copy.queueFailed,
+      );
+      throw error;
+    }
+  }
 
   bot.use(async (ctx, next) => {
     if (ctx.chat?.type === "private" && ctx.from?.id === config.OWNER_ID)

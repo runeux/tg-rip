@@ -1,16 +1,18 @@
 import { Queue, Worker } from "bullmq";
-import { type Api, GrammyError } from "grammy";
+import type { Api } from "grammy";
 import type { Redis } from "ioredis";
 import { copy, UserError } from "./copy";
-import { deliver } from "./delivery";
+import { type BotUploader, deliver } from "./delivery";
 import type { TelegramLink } from "./links";
 import type { Picker } from "./picker";
+import { TransferStatus } from "./progress";
 import type { TelegramSource } from "./telegram";
 
-export type Task =
+export type Task = (
   | { kind: "link"; chat: number; message: number; link: TelegramLink }
   | { kind: "browse"; chat: number; sourceChat: number; key: string }
-  | { kind: "pick"; chat: number; key: string; id: number };
+  | { kind: "pick"; chat: number; key: string; id: number }
+) & { statusMessage?: number };
 
 const queueName = "tg-rip";
 
@@ -29,15 +31,36 @@ export function worker(
   api: Api,
   source: TelegramSource,
   picker: Picker,
+  uploader: BotUploader,
 ) {
   return new Worker<Task>(
     queueName,
     async ({ data: task }) => {
+      let message = task.statusMessage;
+      if (message === undefined) {
+        try {
+          message = (await api.sendMessage(task.chat, "checking…")).message_id;
+        } catch (error) {
+          console.warn(
+            "status unavailable",
+            error instanceof Error ? error.name : "unknown",
+          );
+        }
+      }
+      const status = new TransferStatus(api, task.chat, message);
       try {
+        if (task.statusMessage !== undefined) await status.stage("checking…");
         switch (task.kind) {
           case "link": {
             const files = await source.fromLink(task.link);
-            await deliver(api, source, task.chat, files, task.link.url);
+            await deliver(
+              uploader,
+              source,
+              status,
+              task.chat,
+              files,
+              task.link.url,
+            );
             try {
               await api.deleteMessage(task.chat, task.message);
             } catch (error) {
@@ -46,7 +69,7 @@ export function worker(
                 error instanceof Error ? error.name : "unknown",
               );
             }
-            return;
+            break;
           }
           case "browse": {
             const { name, items } = await source.listTimed(task.sourceChat);
@@ -57,28 +80,27 @@ export function worker(
               items,
             });
             await api.sendMessage(task.chat, view.text, view.options);
-            return;
+            break;
           }
           case "pick": {
             const snapshot = await picker.load(task.key);
             if (!snapshot.items.some(({ id }) => id === task.id))
               throw new UserError(copy.expired);
             const file = await source.getTimed(snapshot.chat, task.id);
-            await deliver(api, source, task.chat, [file]);
+            await deliver(uploader, source, status, task.chat, [file]);
           }
         }
+        await status.finish();
       } catch (error) {
         let message: string = copy.failed;
         if (error instanceof UserError) message = error.message;
-        else if (error instanceof GrammyError && error.error_code === 413)
-          message = copy.tooLarge;
         else
           console.error(
             "job failed",
             task.kind,
             error instanceof Error ? error.name : "unknown",
           );
-        await api.sendMessage(task.chat, message);
+        await status.fail(message);
       }
     },
     { connection, concurrency: 1, maxStalledCount: 0 },
