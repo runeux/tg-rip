@@ -19,13 +19,23 @@ docker compose up -d --build --wait
 
 ## connect your telegram account
 
-the bot token receives requests and sends results. the user session reads the original chats. run the sign-in once from an interactive terminal, then scan the qr in **settings → devices → link desktop device**.
+the bot token receives requests and sends results. the user session reads the original chats. run the sign-in once from an interactive terminal, then scan the qr in **settings → devices → link desktop device**. the qr refreshes when it expires. if telegram asks for 2fa, enter your password at the hidden prompt.
 
 ```sh
 docker compose stop app
 docker compose run --rm --no-deps app bun dist/login.js
 docker compose up -d --wait
 ```
+
+for ssh or agent-assisted login, add `--qr-image`. the command prints the current gif path and expiry each time telegram refreshes the qr. keep the command running while you scan it. with docker, give the login container a name so the agent can copy the current image out with `docker cp` and display it in chat.
+
+```sh
+docker compose run --rm --no-deps --name tg-rip-login app bun dist/login.js --qr-image
+# in another shell, use the path printed by the login command
+docker cp tg-rip-login:/tmp/tg-rip-qr-XXXXXX/telegram-qr.gif ./telegram-qr.gif
+```
+
+for a checkout without docker, use `bun run login --qr-image` and copy the printed file directly. the password prompt stays in the login process, and the temporary image is removed when login finishes.
 
 the session lives in `state/`. a copied session grants access to the account, so keep it alongside your private configuration. the bot uploads over mtproto. files up to 2 gb are supported.
 
