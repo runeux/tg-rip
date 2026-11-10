@@ -35,6 +35,18 @@ export function parseChatId(text: string): number | undefined {
   if (Number.isSafeInteger(id) && id !== 0) return id;
 }
 
+export function parseWebUrl(text: string): URL | undefined {
+  const url = URL.parse(text);
+  if (
+    url &&
+    ["http:", "https:"].includes(url.protocol) &&
+    !url.username &&
+    !url.password &&
+    !url.port
+  )
+    return url;
+}
+
 export function parseTelegramLink(text: string): TelegramLink | undefined {
   let url: URL;
   try {

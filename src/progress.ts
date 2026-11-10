@@ -1,4 +1,5 @@
 import type { Api } from "grammy";
+import { discardMessage, type ExpireMessage } from "./cleanup";
 
 const editInterval = 2_000;
 
@@ -11,6 +12,7 @@ export class TransferStatus {
     private readonly api: Api,
     private readonly chat: number,
     private readonly message?: number,
+    private readonly expire?: ExpireMessage,
   ) {}
 
   async #edit(text: string, parseMode?: "HTML") {
@@ -54,25 +56,19 @@ export class TransferStatus {
 
   async finish() {
     await this.#pending;
-    if (this.message === undefined) return;
-    try {
-      await this.api.deleteMessage(this.chat, this.message);
-    } catch (error) {
-      console.warn(
-        "status retained",
-        error instanceof Error ? error.name : "unknown",
-      );
-    }
+    if (this.message !== undefined)
+      await discardMessage(this.api, this.chat, this.message, this.expire);
   }
 
   async fail(text: string, parseMode?: "HTML") {
     await this.#pending;
     await this.#edit(text, parseMode);
-    if (this.#text !== text) {
-      await this.api.sendMessage(this.chat, text, {
-        parse_mode: parseMode,
-        link_preview_options: { is_disabled: true },
-      });
-    }
+    if (this.message !== undefined && this.#text === text) return this.message;
+    const { message_id } = await this.api.sendMessage(this.chat, text, {
+      parse_mode: parseMode,
+      link_preview_options: { is_disabled: true },
+    });
+    await this.finish();
+    return message_id;
   }
 }

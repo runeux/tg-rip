@@ -1,5 +1,7 @@
 export const copy = {
-  start: "send a telegram link or chat id",
+  start: "send a media link or telegram chat id",
+  unsupported: "is not supported",
+  webSignIn: "requires a signed-in session",
   chatNotFound: "chat not found",
   noTimedMedia: "no timed media available",
   expired: "selection expired. send the chat id again",
@@ -33,6 +35,10 @@ export function escapeHtml(text: string): string {
 
 export function sourceCaption(url: string): string {
   return `<a href="${escapeHtml(url)}"><b>source</b></a>`;
+}
+
+export function chatIdHeader(id: number): string {
+  return `<code>${id}</code>\n\n`;
 }
 
 export function downloadFailures(urls: string[]): string {

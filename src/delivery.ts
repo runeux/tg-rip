@@ -11,12 +11,10 @@ import {
   MtTimeoutError,
   TelegramClient,
 } from "@mtcute/bun";
-import type { Config } from "./config";
+import { type Config, maxMediaBytes } from "./config";
 import { copy, downloadFailures, sourceCaption, UserError } from "./copy";
 import type { TransferStatus } from "./progress";
 import type { Attachment, SourceAttachment, TelegramSource } from "./telegram";
-
-const maxBytes = 2_000_000_000;
 
 type Media =
   | InputMediaPhoto
@@ -178,6 +176,57 @@ function album(files: Media[]): Media[] {
   }));
 }
 
+export async function deliverWebFiles(
+  uploader: Pick<BotUploader, "send">,
+  status: TransferStatus,
+  chat: number,
+  paths: string[],
+  link: string,
+) {
+  const files: Media[] = [];
+  const sizes: number[] = [];
+  for (const path of paths) {
+    const file = Bun.file(path);
+    const { size } = await stat(path);
+    if (!size) throw new UserError(copy.unavailable);
+    if (size > maxMediaBytes) throw new UserError(copy.tooLarge);
+    const base = {
+      file: file.stream(),
+      fileSize: size,
+      fileName: basename(path),
+      fileMime: file.type,
+    };
+    if (file.type === "video/mp4")
+      files.push({ ...base, type: "video", supportsStreaming: true });
+    else if (file.type === "audio/mpeg") files.push({ ...base, type: "audio" });
+    else if (
+      size <= 10_000_000 &&
+      ["image/jpeg", "image/png"].includes(file.type)
+    )
+      files.push({ ...base, type: "photo" });
+    else files.push({ ...base, type: "document" });
+    sizes.push(size);
+  }
+
+  const groupType = (file: Media) =>
+    file.type === "photo" || file.type === "video" ? "visual" : file.type;
+  for (let index = 0; index < files.length; ) {
+    const type = groupType(files[index]);
+    let end = index + 1;
+    while (
+      end < files.length &&
+      end < index + 10 &&
+      groupType(files[end]) === type
+    )
+      end++;
+
+    const group = files.slice(index, end);
+    group[0].caption = html(sourceCaption(link));
+    await uploader.send(chat, group, sizes.slice(index, end), status);
+    index = end;
+  }
+}
+
 export async function deliver(
   uploader: Pick<BotUploader, "send">,
   source: Pick<TelegramSource, "download">,
@@ -204,7 +253,7 @@ export async function deliver(
       const expected = media.fileSize ?? 0;
       let size: number;
       try {
-        if (expected > maxBytes) throw new UserError(copy.tooLarge);
+        if (expected > maxMediaBytes) throw new UserError(copy.tooLarge);
         await source.download(path, media, (done, total) => {
           status.progress(
             "downloading",
@@ -213,7 +262,7 @@ export async function deliver(
           );
         });
         ({ size } = await stat(path));
-        if (size > maxBytes) throw new UserError(copy.tooLarge);
+        if (size > maxMediaBytes) throw new UserError(copy.tooLarge);
         if (!size || (expected && size !== expected))
           throw new UserError(copy.unavailable);
       } catch (error) {
@@ -246,7 +295,6 @@ export async function deliver(
       bytes: sizes.reduce((sum, size) => sum + size, 0),
       failed: failures.length,
     });
-    return failures.length === 0;
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

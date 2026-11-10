@@ -1,5 +1,7 @@
 import { type } from "arktype";
 
+export const maxMediaBytes = 2_000_000_000;
+
 const telegramSchema = type({
   TG_API_ID: "string.numeric.parse",
   TG_API_HASH: "/^[0-9a-f]{32}$/",
@@ -13,6 +15,9 @@ const appSchema = telegramSchema.and({
   WEBHOOK_URL: "string.url",
   REDIS_URL: "string.url",
   TIME_ZONE: "string > 0",
+  "LISTEN_HOST?": "string > 0",
+  "LISTEN_PORT?": type("string.integer.parse").to("1 <= number <= 65535"),
+  "WEB_COOKIES_PATH?": "string",
 });
 
 export type TelegramConfig = typeof telegramSchema.infer;

@@ -4,11 +4,13 @@ import { dirname } from "node:path";
 import { webhookCallback } from "grammy";
 import Redis from "ioredis";
 import { createBot } from "./bot";
+import { messageCleanup } from "./cleanup";
 import { appConfig } from "./config";
 import { BotUploader } from "./delivery";
 import { taskQueue, worker } from "./jobs";
 import { Picker } from "./picker";
 import { TelegramSource } from "./telegram";
+import { WebPicker } from "./web-picker";
 
 const config = appConfig();
 process.umask(0o077);
@@ -19,23 +21,36 @@ const queue = taskQueue(redis);
 const source = new TelegramSource(config);
 const uploader = new BotUploader(config);
 const picker = new Picker(redis, config.TIME_ZONE);
-const bot = createBot(config, redis, queue, picker);
+const webPicker = new WebPicker(redis);
+const bot = createBot(config, redis, queue, picker, webPicker, expireMessage);
+const cleanup = messageCleanup(redis, workerRedis, bot.api);
+function expireMessage(chat: number, message: number) {
+  return cleanup.expire(chat, message);
+}
 await bot.init();
 
-const jobs = worker(workerRedis, bot.api, source, picker, uploader);
+const jobs = worker(
+  workerRedis,
+  bot.api,
+  source,
+  picker,
+  uploader,
+  expireMessage,
+  { picker: webPicker, cookies: config.WEB_COOKIES_PATH },
+);
 jobs.on("error", (error) => console.error("worker error", error.name));
 jobs.on("failed", (_job, error) =>
   console.error("job delivery error", error.name),
 );
-await jobs.waitUntilReady();
+await Promise.all([jobs.waitUntilReady(), cleanup.worker.waitUntilReady()]);
 
 const path = new URL(config.WEBHOOK_URL).pathname;
 const expected = Buffer.from(config.WEBHOOK_SECRET);
 const webhook = webhookCallback(bot, "bun", { timeoutMilliseconds: 10_000 });
 let lastUpdate: Promise<unknown> = Promise.resolve();
 const server = Bun.serve({
-  hostname: "0.0.0.0",
-  port: 8080,
+  hostname: config.LISTEN_HOST ?? "0.0.0.0",
+  port: config.LISTEN_PORT ?? 8080,
   maxRequestBodySize: 1024 * 1024,
   fetch(request) {
     const pathname = new URL(request.url).pathname;
@@ -85,7 +100,11 @@ try {
 async function shutdown() {
   server.stop();
   await jobs.close();
-  await queue.close();
+  await Promise.all([
+    queue.close(),
+    cleanup.worker.close(),
+    cleanup.queue.close(),
+  ]);
   await Promise.all([source.close(), uploader.close()]);
   redis.disconnect();
   workerRedis.disconnect();

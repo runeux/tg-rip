@@ -1,7 +1,7 @@
 import { type } from "arktype";
 import { type Api, InlineKeyboard } from "grammy";
 import type { Redis } from "ioredis";
-import { copy, escapeHtml, UserError } from "./copy";
+import { chatIdHeader, copy, escapeHtml, UserError } from "./copy";
 
 export const pickerTtl = 900;
 const pageSize = 10;
@@ -64,7 +64,7 @@ export class Picker {
     if (page > 0) buttons.text("previous", `rip:${key}:page:${page - 1}`);
     if (page + 1 < pages) buttons.text("next", `rip:${key}:page:${page + 1}`);
     return {
-      text: `<b>found chat "${escapeHtml(data.name)}"</b> – ${data.items.length} media available`,
+      text: `${chatIdHeader(data.chat)}<b>found chat "${escapeHtml(data.name)}"</b> – ${data.items.length} media available`,
       options: { parse_mode: "HTML", reply_markup: buttons } as const,
     };
   }
